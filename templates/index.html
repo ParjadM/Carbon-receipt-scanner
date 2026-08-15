@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CarbonReceipt - Footprint Scanner</title>
+    <!-- Use Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+    
+    <!-- React, ReactDOM, and Babel from CDN -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        {% raw %}
+        const { useState, useRef, useEffect } = React;
+            
+        const getGrade = (co2) => {
+            if (co2 < 5000) return { letter: 'A', label: 'Excellent', color: '#10b981' };
+            if (co2 < 10000) return { letter: 'B', label: 'Good', color: '#3b82f6' };
+            if (co2 < 20000) return { letter: 'C', label: 'Average', color: '#f59e0b' };
+            if (co2 < 30000) return { letter: 'D', label: 'High', color: '#f97316' };
+            return { letter: 'F', label: 'Very High', color: '#ef4444' };
+        };
+        
+        const getEquivalents = (co2) => {
+            // Average car emits ~400g CO2 per mile
+            const miles = (co2 / 400).toFixed(1);
+            // High-quality offset cost is often around $0.05 per kg ($50/ton)
+            const cost = (co2 / 1000 * 0.05).toFixed(2);
+            // A mature tree absorbs ~21,000g of CO2 per year
+            const trees = (co2 / 21000).toFixed(2);
+            return { miles, cost, trees };
+        };
+
+        function App() {
+            const [file, setFile] = useState(null);
+            const [previewUrl, setPreviewUrl] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [result, setResult] = useState(null);
+            const [error, setError] = useState(null);
+            const [progress, setProgress] = React.useState(0);
+            const [timeElapsed, setTimeElapsed] = React.useState(0);
+            const [fullScreenPreview, setFullScreenPreview] = React.useState(null);
+            const [expandedHistoryId, setExpandedHistoryId] = React.useState(null);
+            const [isCameraActive, setIsCameraActive] = React.useState(false);
+            const videoRef = React.useRef(null);
+            const canvasRef = React.useRef(null);
+            const streamRef = React.useRef(null);
+            
+            const [devices, setDevices] = React.useState([]);
+            const [currentDeviceIndex, setCurrentDeviceIndex] = React.useState(0);
+            
+            const [history, setHistory] = React.useState(() => {
+                const saved = localStorage.getItem('carbon_history');
+                return saved ? JSON.parse(saved) : [];
+            });
+            const progressInterval = React.useRef(null);
+            const timerInterval = React.useRef(null);
+            const fileInputRef = React.useRef(null);
+            
+            React.useEffect(() => {
+                return () => stopCamera();
+            }, []);
+            
+            React.useEffect(() => {
+                if (isCameraActive && videoRef.current && streamRef.current) {
+                    videoRef.current.srcObject = streamRef.current;
+                    videoRef.current.play().catch(e => console.error("Video play error:", e));
+                }
+            }, [isCameraActive]);
+            
+            const stopCamera = () => {
+                if (streamRef.current) {
+                    streamRef.current.getTracks().forEach(track => track.stop());
+                    streamRef.current = null;
+                }
+                setIsCameraActive(false);
+            };
+            
+            const startCamera = async (specificDeviceId = null) => {
+                setError(null);
+                
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    setError("Camera API is not supported. Please ensure you are using HTTPS or localhost.");
+                    return;
+                }
+                
+                try {
+                    let constraints = { video: { width: { ideal: 1280 }, height: { ideal: 720 } } };
+                    if (typeof specificDeviceId === 'string') {
+                        constraints.video.deviceId = { exact: specificDeviceId };
+                    }
+                    
+                    let stream;
+                    try {
+                        stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    } catch (initialErr) {
+                        // Fallback to basic constraints if HD resolution is rejected by camera driver
+                        let basicConstraints = { video: true };
+                        if (typeof specificDeviceId === 'string') {
+                            basicConstraints.video = { deviceId: { exact: specificDeviceId } };
+                        }
+                        stream = await navigator.mediaDevices.getUserMedia(basicConstraints);
+                    }
+                    
+                    streamRef.current = stream;
+                    setIsCameraActive(true);
+                    
+                    // Fetch available cameras for the Switch button
+                    const allDevices = await navigator.mediaDevices.enumerateDevices();
+                    const videoDevices = allDevices.filter(d => d.kind === 'videoinput');
+                    setDevices(videoDevices);
+                    
+                    setTimeout(() => {
+                        if (videoRef.current && videoRef.current.srcObject !== stream) {
+                            videoRef.current.srcObject = stream;
+                            videoRef.current.play().catch(e => console.error("Play error:", e));
+                        }
+                    }, 200);
+                } catch (err) {
+                    console.error("Camera error:", err);
+                    const errMsg = err.name || err.message || "Hardware Block";
+                    setError(`Camera Error: ${errMsg}. Please check if another app (like Zoom/Teams) is using the camera, or check Windows Privacy settings.`);
+                }
+            };
+            
+            const switchCamera = () => {
+                if (devices.length > 1) {
+                    const nextIndex = (currentDeviceIndex + 1) % devices.length;
+                    setCurrentDeviceIndex(nextIndex);
+                    stopCamera();
+                    setTimeout(() => {
+                        startCamera(devices[nextIndex].deviceId);
+                    }, 300);
+                }
+            };
+            
+            const capturePhoto = () => {
+                if (videoRef.current && canvasRef.current) {
+                    const video = videoRef.current;
+                    const canvas = canvasRef.current;
+                    
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    
+                    canvas.toBlob((blob) => {
+                        if (blob) {
+                            const capturedFile = new File([blob], "camera_capture.jpg", { type: "image/jpeg" });
+                            setFile(capturedFile);
+                            setPreviewUrl(URL.createObjectURL(capturedFile));
+                            stopCamera();
+                        }
+                    }, 'image/jpeg', 0.9);
+                }
+            };
+            
+            const deleteHistoryItem = (id) => {
+                setHistory(prev => {
+                    const newHistory = prev.filter(item => item.id !== id);
+                    localStorage.setItem('carbon_history', JSON.stringify(newHistory));
+                    return newHistory;
+                });
+            };
+            
+            const clearHistory = () => {
+                setHistory([]);
+                localStorage.removeItem('carbon_history');
+            };
+
+            const handleFileChange = (e) => {
+                const selectedFile = e.target.files[0];
+                if (selectedFile) {
+                    setFile(selectedFile);
+                    setPreviewUrl(URL.createObjectURL(selectedFile));
+                    setResult(null);
+                    setError(null);
+                }
+            };
+
+            const triggerFileInput = () => {
+                fileInputRef.current.click();
+            };
+
+            const handleSubmit = async () => {
+                if (!file) return;
+
+                setLoading(true);
+                setError(null);
+                setResult(null);
+                setProgress(0);
+                setTimeElapsed(0);
+                
+                const startTime = Date.now();
+                timerInterval.current = setInterval(() => {
+                    setTimeElapsed(((Date.now() - startTime) / 1000).toFixed(1));
+                }, 100);
+                
+                // Fake progress scaled for up to 30 seconds (30s = 150 ticks at 200ms)
+                // 95% / 150 = 0.63% per tick
+                progressInterval.current = setInterval(() => {
+                    setProgress(prev => {
+                        return Math.min(95, prev + 0.63); 
+                    });
+                }, 200);
+
+                const formData = new FormData();
+                formData.append('receipt', file);
+
+                try {
+                    const response = await fetch('/api/scan', {
+                        method: 'POST',
+                        body: formData,
+                    });
+                    
+                    const data = await response.json();
+                    
+                    clearInterval(progressInterval.current);
+                    clearInterval(timerInterval.current);
+                    setProgress(100);
+                    
+                    if (!response.ok) {
+                        throw new Error(data.error || 'Failed to scan receipt');
+                    }
+                    
+                    // Small delay to let user see 100% completion
+                    setTimeout(() => {
+                        setResult(data);
+                        setLoading(false);
+                        
+                        // Add to history
+                        const newEntry = {
+                            id: Date.now(),
+                            date: new Date().toLocaleDateString(),
+                            total_g_co2: data.total_g_co2,
+                            items_count: data.items ? data.items.length : 0,
+                            image_url: data.image_url,
+                            items: data.items
+                        };
+                        setHistory(prev => {
+                            const newHistory = [newEntry, ...prev];
+                            localStorage.setItem('carbon_history', JSON.stringify(newHistory));
+                            return newHistory;
+                        });
+                    }, 400);
+
+                } catch (err) {
+                    clearInterval(progressInterval.current);
+                    clearInterval(timerInterval.current);
+                    setError(err.message);
+                    setLoading(false);
+                }
+            };
+
+            const reset = () => {
+                setFile(null);
+                setPreviewUrl(null);
+                setResult(null);
+                setError(null);
+                stopCamera();
+            };
+
+            if (fullScreenPreview) {
+                return (
+                    <div className="fullscreen-preview">
+                        <button className="btn-secondary back-btn" onClick={() => setFullScreenPreview(null)}>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{marginRight: '8px'}}>
+                                <path d="m15 18-6-6 6-6"/>
+                            </svg>
+                            Back to History
+                        </button>
+                        <img src={fullScreenPreview} alt="Receipt Preview" className="preview-image-large" />
+                    </div>
+                );
+            }
+
+            return (
+                <div className="container">
+                    <header>
+                        <div className="logo">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{color: "var(--primary)"}}>
+                                <path d="M11 20A7 7 0 0 1 14 6c7 0 7 7 7 7a7 7 0 0 1-7 7c-7 0-7-7-7-7Z"/>
+                                <path d="M14 6a7 7 0 0 1-7 7"/>
+                                <path d="M11 20v-5"/>
+                            </svg>
+                            <h1>CarbonReceipt</h1>
+                        </div>
+                        <p>Discover the environmental impact of your purchases instantly.</p>
+                    </header>
+
+                    <main>
+                        {!result && !loading && (
+                            <div className="upload-section">
+                                <div className={`drop-zone ${file ? 'has-file' : ''} ${isCameraActive ? 'camera-active' : ''}`}>
+                                    <input 
+                                        type="file" 
+                                        ref={fileInputRef} 
+                                        onChange={handleFileChange} 
+                                        accept="image/png, image/jpeg, image/jpg" 
+                                        style={{ display: 'none' }} 
+                                    />
+                                    
+                                    {isCameraActive ? (
+                                        <div className="camera-container" style={{width: '100%', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center'}}>
+                                            <video 
+                                                ref={videoRef} 
+                                                autoPlay 
+                                                playsInline 
+                                                muted 
+                                                onLoadedMetadata={(e) => e.target.play().catch(err => console.log(err))}
+                                                style={{width: '100%', maxHeight: '350px', borderRadius: '8px', objectFit: 'cover', backgroundColor: 'black'}}
+                                            ></video>
+                                            <canvas ref={canvasRef} style={{display: 'none'}}></canvas>
+                                            <div style={{display: 'flex', gap: '10px', marginTop: '15px', width: '100%', justifyContent: 'center'}}>
+                                                <button className="btn-secondary" style={{flex: 1}} onClick={stopCamera}>Cancel</button>
+                                                {devices.length > 1 && (
+                                                    <button className="btn-secondary" style={{flex: 1}} onClick={switchCamera}>Switch</button>
+                                                )}
+                                                <button className="btn-primary" style={{flex: 2}} onClick={capturePhoto}>Capture Snap</button>
+                                            </div>
+                                        </div>
+                                    ) : previewUrl ? (
+                                        <div className="preview-container">
+                                            <img src={previewUrl} alt="Receipt preview" className="image-preview" />
+                                            <button className="btn-secondary remove-btn" onClick={reset}>
+                                                Remove
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div className="upload-prompt" style={{width: '100%'}}>
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="upload-icon">
+                                                <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/>
+                                                <path d="M12 12v9"/>
+                                                <path d="m16 16-4-4-4 4"/>
+                                            </svg>
+                                            <p className="upload-title">Select a receipt image</p>
+                                            <p className="upload-subtitle">Upload a file or use your camera</p>
+                                            
+                                            <div style={{display: 'flex', gap: '10px', marginTop: '20px', width: '100%'}}>
+                                                <button className="btn-primary" onClick={triggerFileInput}>
+                                                    Upload File
+                                                </button>
+                                                <button className="btn-secondary" onClick={() => startCamera()}>
+                                                    Use Camera
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <button 
+                                    className="btn-primary scan-btn" 
+                                    onClick={handleSubmit} 
+                                    disabled={!file || loading}
+                                >
+                                    {loading ? 'Scanning impact...' : 'Calculate Footprint'}
+                                </button>
+                                
+                                {error && (
+                                    <div className="error-message">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                            <circle cx="12" cy="12" r="10"/>
+                                            <line x1="12" y1="8" x2="12" y2="12"/>
+                                            <line x1="12" y1="16" x2="12.01" y2="16"/>
+                                        </svg>
+                                        {error}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {history.length > 0 && !loading && !result && (
+                            <div className="history-section">
+                                <div className="history-header">
+                                    <h3>Your Scan History</h3>
+                                    <button onClick={clearHistory} className="btn-secondary clear-btn">Clear All</button>
+                                </div>
+                                <div className="history-list">
+                                    {history.map(item => (
+                                        <div key={item.id} className="history-card" style={{marginBottom: '12px'}}>
+                                            <div className="history-item" style={{
+                                                marginBottom: 0, 
+                                                borderBottomLeftRadius: expandedHistoryId === item.id ? 0 : '12px', 
+                                                borderBottomRightRadius: expandedHistoryId === item.id ? 0 : '12px',
+                                                borderBottom: expandedHistoryId === item.id ? 'none' : '1px solid var(--border-color)'
+                                            }}>
+                                                <div className="history-info">
+                                                    <div style={{fontWeight: 600}}>{item.date}</div>
+                                                    <div style={{fontSize: '13px', color: 'var(--text-secondary)'}}>{item.items_count} items</div>
+                                                </div>
+                                                <div className="history-actions">
+                                                    <div style={{fontWeight: 700, fontSize: '16px', marginRight: '4px'}}>{item.total_g_co2}g</div>
+                                                    <div className="grade-badge small" style={{backgroundColor: getGrade(item.total_g_co2).color}}>
+                                                        {getGrade(item.total_g_co2).letter}
+                                                    </div>
+                                                    {item.items && (
+                                                        <button onClick={() => setExpandedHistoryId(expandedHistoryId === item.id ? null : item.id)} className="btn-secondary action-btn">
+                                                            {expandedHistoryId === item.id ? 'Hide' : 'Details'}
+                                                        </button>
+                                                    )}
+                                                    {item.image_url && (
+                                                        <button onClick={() => setFullScreenPreview(item.image_url)} className="btn-secondary action-btn">
+                                                            Preview
+                                                        </button>
+                                                    )}
+                                                    <button onClick={() => deleteHistoryItem(item.id)} className="btn-secondary action-btn delete-btn">
+                                                        Delete
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            {expandedHistoryId === item.id && item.items && (
+                                                <div className="history-details" style={{
+                                                    padding: '16px', 
+                                                    background: 'var(--bg-color)', 
+                                                    border: '1px solid var(--border-color)', 
+                                                    borderTop: '1px dashed var(--border-color)',
+                                                    borderBottomLeftRadius: '12px', 
+                                                    borderBottomRightRadius: '12px'
+                                                }}>
+                                                    <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '10px'}}>
+                                                        <h4 style={{margin: 0, fontSize: '14px', color: 'var(--text-primary)'}}>Item Breakdown</h4>
+                                                    </div>
+                                                    <ul className="item-list" style={{marginBottom: 0, gap: '6px'}}>
+                                                        {item.items.map((scanItem, idx) => (
+                                                            <li key={idx} style={{padding: '8px 12px', fontSize: '13px', background: 'white'}}>
+                                                                <span className="item-name">{scanItem.name}</span>
+                                                                <span className="item-co2">{scanItem.co2} g</span>
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {loading && (
+                            <div className="loading-state">
+                                <div className="loading-spinner"></div>
+                                <p className="loading-text">
+                                    Analyzing receipt with Gemini AI... <span style={{fontWeight: 600}}>({timeElapsed}s)</span>
+                                </p>
+                                <div className="progress-container">
+                                    <div className="progress-bar" style={{ width: `${progress}%` }}></div>
+                                </div>
+                            </div>
+                        )}
+
+                        {result && (
+                            <div className="results-section">
+                                <div className="result-card">
+                                    <div className="score-header">
+                                        <h2>Total Carbon Footprint</h2>
+                                        <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '15px', marginTop: '10px'}}>
+                                            <div className="score-value" style={{marginBottom: 0}}>
+                                                {result.total_g_co2} <span className="unit">g CO₂e</span>
+                                            </div>
+                                            <div className="grade-badge" style={{backgroundColor: getGrade(result.total_g_co2).color}}>
+                                                {getGrade(result.total_g_co2).letter}
+                                            </div>
+                                        </div>
+                                        <div style={{fontSize: '15px', color: 'var(--text-primary)', marginTop: '8px', fontWeight: '600'}}>
+                                            {getGrade(result.total_g_co2).label} Impact
+                                        </div>
+                                        <div style={{fontSize: '13px', color: 'var(--text-secondary)', marginTop: '4px'}}>
+                                            Processed in {timeElapsed}s
+                                        </div>
+                                    </div>
+
+                                    {result.items && result.items.length > 0 ? (
+                                        <div className="breakdown">
+                                            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '15px'}}>
+                                                <h3 style={{margin: 0}}>Item Breakdown</h3>
+                                                <div style={{fontSize: '12px', color: 'var(--text-secondary)', textAlign: 'right'}}>
+                                                    <span style={{color: '#10b981', fontWeight: 600}}>Low</span> is better, <span style={{color: '#ef4444', fontWeight: 600}}>High</span> is worse
+                                                </div>
+                                            </div>
+                                            <ul className="item-list">
+                                                {result.items.map((item, idx) => (
+                                                    <li key={idx}>
+                                                        <span className="item-name">{item.name}</span>
+                                                        <span className="item-co2">{item.co2} g</span>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        </div>
+                                    ) : (
+                                        <div className="no-items">
+                                            <p>We couldn't identify any high-impact food items on this receipt.</p>
+                                        </div>
+                                    )}
+                                    
+                                    <div className="impact-simulator" style={{background: '#f0fdf4', padding: '20px', borderRadius: '12px', border: '1px solid #bbf7d0', marginBottom: '20px'}}>
+                                        <h3 style={{fontSize: '16px', color: '#166534', margin: '0 0 12px 0'}}>Impact Equivalents</h3>
+                                        <div style={{display: 'flex', gap: '15px', marginBottom: '15px'}}>
+                                            <div style={{flex: 1, background: 'white', padding: '12px', borderRadius: '8px', textAlign: 'center'}}>
+                                                <div style={{fontSize: '20px', fontWeight: '800', color: '#166534'}}>{getEquivalents(result.total_g_co2).miles}</div>
+                                                <div style={{fontSize: '12px', color: 'var(--text-secondary)'}}>Miles driven</div>
+                                            </div>
+                                            <div style={{flex: 1, background: 'white', padding: '12px', borderRadius: '8px', textAlign: 'center'}}>
+                                                <div style={{fontSize: '20px', fontWeight: '800', color: '#166534'}}>{getEquivalents(result.total_g_co2).trees}</div>
+                                                <div style={{fontSize: '12px', color: 'var(--text-secondary)'}}>Trees to plant</div>
+                                            </div>
+                                        </div>
+                                        <button className="btn-primary" style={{width: '100%', background: '#166534', color: 'white', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px'}} onClick={() => alert(`In a real app, this would process a $${getEquivalents(result.total_g_co2).cost} micro-transaction to a certified carbon offset fund.`)}>
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 20A7 7 0 0 1 14 6c7 0 7 7 7 7a7 7 0 0 1-7 7c-7 0-7-7-7-7Z"/><path d="M14 6a7 7 0 0 1-7 7"/></svg>
+                                            Offset impact for ${getEquivalents(result.total_g_co2).cost}
+                                        </button>
+                                    </div>
+
+                                    <button className="btn-secondary reset-btn" onClick={reset}>
+                                        Scan Another Receipt
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                    </main>
+                    
+                    <style>{`
+                        .loading-state {
+                            display: flex;
+                            flex-direction: column;
+                            align-items: center;
+                            justify-content: center;
+                            padding: 40px;
+                            text-align: center;
+                        }
+                        
+                        .progress-container {
+                            width: 100%;
+                            max-width: 300px;
+                            height: 8px;
+                            background-color: var(--border-color);
+                            border-radius: 4px;
+                            overflow: hidden;
+                            margin-top: 20px;
+                        }
+                        
+                        .progress-bar {
+                            height: 100%;
+                            background-color: var(--primary);
+                            transition: width 0.2s ease-out;
+                        }
+                        
+                        .loading-text {
+                            color: var(--text-secondary);
+                            font-size: 14px;
+                            margin-top: 15px;
+                        }
+                        
+                        .grade-badge {
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                            width: 52px;
+                            height: 52px;
+                            border-radius: 12px;
+                            color: white;
+                            font-size: 26px;
+                            font-weight: 800;
+                            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                            text-shadow: 0 1px 2px rgba(0,0,0,0.2);
+                        }
+                        
+                        .grade-badge.small {
+                            width: 32px;
+                            height: 32px;
+                            border-radius: 8px;
+                            font-size: 16px;
+                            box-shadow: none;
+                            text-shadow: none;
+                        }
+
+                        .history-item {
+                            display: flex;
+                            justify-content: space-between;
+                            align-items: center;
+                            padding: 16px;
+                            background: white;
+                            border: 1px solid var(--border-color);
+                            border-radius: 12px;
+                            transition: transform 0.1s ease;
+                        }
+                        
+                        .history-item:hover {
+                            transform: translateY(-2px);
+                            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+                        }
+                        
+                        /* Custom additions for history list UI */
+                        .history-section {
+                            margin-top: 40px;
+                            width: 100%;
+                            max-width: 600px;
+                        }
+                        
+                        .history-header {
+                            display: flex;
+                            justify-content: space-between;
+                            align-items: center;
+                            margin-bottom: 20px;
+                            width: 100%;
+                            flex-wrap: nowrap;
+                        }
+                        
+                        .history-header h3 {
+                            color: var(--text-primary);
+                            margin: 0;
+                            white-space: nowrap;
+                            font-size: 22px;
+                        }
+                        
+                        .clear-btn {
+                            padding: 8px 16px;
+                            font-size: 14px;
+                            white-space: nowrap;
+                            flex-shrink: 0;
+                            margin-left: auto;
+                            width: auto;
+                        }
+                        
+                        .history-actions {
+                            display: flex;
+                            align-items: center;
+                            gap: 8px;
+                        }
+                        
+                        .action-btn {
+                            padding: 6px 12px;
+                            font-size: 12px;
+                            width: auto;
+                        }
+                        
+                        .delete-btn {
+                            color: #ef4444;
+                            border-color: #fee2e2;
+                            background-color: #fef2f2;
+                        }
+                        .delete-btn:hover {
+                            background-color: #fee2e2;
+                            border-color: #fca5a5;
+                        }
+                        
+                        /* Fullscreen Preview styles */
+                        .fullscreen-preview {
+                            position: fixed;
+                            top: 0;
+                            left: 0;
+                            width: 100vw;
+                            height: 100vh;
+                            background-color: var(--bg-color);
+                            z-index: 1000;
+                            display: flex;
+                            flex-direction: column;
+                            align-items: center;
+                            padding: 20px;
+                            box-sizing: border-box;
+                            overflow-y: auto;
+                        }
+                        
+                        .back-btn {
+                            position: absolute;
+                            top: 20px;
+                            left: 20px;
+                            display: flex;
+                            align-items: center;
+                            padding: 10px 16px;
+                            font-size: 15px;
+                            z-index: 1010;
+                            background-color: white;
+                        }
+                        
+                        .preview-image-large {
+                            max-width: 100%;
+                            max-height: 85vh;
+                            object-fit: contain;
+                            margin-top: 70px;
+                            border-radius: 12px;
+                            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+                        }
+                        
+                        /* Media Queries */
+                        @media (max-width: 560px) {
+                            .history-header h3 {
+                                font-size: 18px;
+                            }
+                            .clear-btn {
+                                padding: 6px 12px;
+                                font-size: 12px;
+                            }
+                            .history-item {
+                                flex-direction: column;
+                                align-items: flex-start;
+                                gap: 16px;
+                            }
+                            .history-actions {
+                                width: 100%;
+                                justify-content: space-between;
+                            }
+                            .action-btn {
+                                flex-grow: 1;
+                                text-align: center;
+                                padding: 8px 12px;
+                            }
+                        }
+                    `}</style>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+        {% endraw %}
+    </script>
+</body>
+</html>
