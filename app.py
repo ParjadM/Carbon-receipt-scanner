@@ -25,16 +25,11 @@ def scan_receipt():
     image_bytes = file.read()
     mime_type = file.mimetype
     
-    # Save image for history preview
-    ext = file.filename.split('.')[-1] if '.' in file.filename else 'jpg'
-    filename = f"receipt_{uuid.uuid4().hex}.{ext}"
-    uploads_dir = os.path.join(app.root_path, 'static', 'uploads')
-    os.makedirs(uploads_dir, exist_ok=True)
-    
-    with open(os.path.join(uploads_dir, filename), 'wb') as f:
-        f.write(image_bytes)
-        
-    image_url = f"/static/uploads/{filename}"
+    # Do not save to disk (Vercel has a read-only filesystem and ephemeral instances)
+    # Instead, return the image directly as a base64 data URI for the frontend preview
+    import base64
+    base64_encoded = base64.b64encode(image_bytes).decode('utf-8')
+    image_url = f"data:{mime_type};base64,{base64_encoded}"
     
     # Calculate footprint (Directly using Multimodal Gemini)
     result = estimate_footprint(image_bytes, mime_type)
