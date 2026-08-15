@@ -30,7 +30,7 @@ def estimate_footprint(image_bytes, mime_type="image/jpeg"):
         "data": image_bytes
     }
     
-    models_to_try = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.5-pro']
+    models_to_try = ['gemini-1.5-flash-latest', 'gemini-1.5-flash', 'gemini-1.5-pro-latest']
     last_error = None
     
     for model_name in models_to_try:
