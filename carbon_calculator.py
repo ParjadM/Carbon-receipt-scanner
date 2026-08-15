@@ -66,14 +66,6 @@ def estimate_footprint(image_bytes, mime_type="image/jpeg"):
             print(f"Failed with {model_name}: {e}")
             last_error = e
 
-    # If all API calls fail (e.g. rate limit exhausted on all free tier models)
-    # Return mock data so the hackathon demo doesn't completely crash!
-    print("All models failed (likely rate limited). Using fallback mock data for demo.")
-    return {
-        "items": [
-            {"name": "[Demo Mode] Organic Bananas", "co2": 150},
-            {"name": "[Demo Mode] Whole Milk 1 Gal", "co2": 1200},
-            {"name": "[Demo Mode] Ribeye Steak", "co2": 15000}
-        ],
-        "total_g_co2": 16350
-    }
+    # If all API calls fail
+    print("All models failed.")
+    return {"error": f"Failed to analyze receipt. Last error: {str(last_error)}"}
