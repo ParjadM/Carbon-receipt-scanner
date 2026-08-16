@@ -52,3 +52,8 @@ The backend uses a finely-tuned prompt passed to the Gemini Vision model to igno
 
 ## License
 MIT
+
+## Created by
+1) Parjad Minooei
+2) Aatman Shah
+3) Akhil Sam
